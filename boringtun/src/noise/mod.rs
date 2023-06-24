@@ -45,9 +45,9 @@ const N_SESSIONS: usize = 8;
 pub enum TunnResult<'a> {
     Done,
     Err(WireGuardError),
-    WriteToNetwork(&'a mut [u8]),
-    WriteToTunnelV4(&'a mut [u8], Ipv4Addr),
-    WriteToTunnelV6(&'a mut [u8], Ipv6Addr),
+    WriteToNetwork(&'a [u8]),
+    WriteToTunnelV4(&'a [u8], Ipv4Addr),
+    WriteToTunnelV6(&'a [u8], Ipv6Addr),
 }
 
 impl<'a> From<WireGuardError> for TunnResult<'a> {
