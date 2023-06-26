@@ -337,6 +337,7 @@ impl Device {
         )
         .unwrap();
 
+        tracing::info!("new peer: {endpoint:?}");
         let peer = Peer::new(
             tunn,
             next_index,
