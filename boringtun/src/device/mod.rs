@@ -429,23 +429,27 @@ impl Device {
         // Then open new sockets and bind to the port
         let tcp_listener4 = socket2::Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
         tcp_listener4.set_reuse_address(true)?;
+        // tcp_listener4.set_only_v6(false)?;
         tcp_listener4.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port).into())?;
         tcp_listener4.set_nonblocking(true)?;
+        tcp_listener4.listen(128)?;
 
         if port == 0 {
             // Random port was assigned
             port = tcp_listener4.local_addr()?.as_socket().unwrap().port();
         }
+        tracing::info!("listen port {port}");
 
-        let tcp_listener6 = socket2::Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))?;
-        tcp_listener6.set_reuse_address(true)?;
-        tcp_listener6.bind(&SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0).into())?;
-        tcp_listener6.set_nonblocking(true)?;
+        // let tcp_listener6 = socket2::Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))?;
+        // tcp_listener6.set_reuse_address(true)?;
+        // tcp_listener6.bind(&SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0).into())?;
+        // tcp_listener6.set_nonblocking(true)?;
+        // tcp_listener6.listen(128)?;
 
         self.register_tcp_handler(tcp_listener4.try_clone().unwrap())?;
-        self.register_tcp_handler(tcp_listener6.try_clone().unwrap())?;
+        // self.register_tcp_handler(tcp_listener6.try_clone().unwrap())?;
         self.tcp4 = Some(tcp_listener4);
-        self.tcp6 = Some(tcp_listener6);
+        // self.tcp6 = Some(tcp_listener6);
 
         self.listen_port = port;
 
@@ -611,8 +615,8 @@ impl Device {
         self.queue.new_event(
             tcp.as_raw_fd(),
             Box::new(move |d, _t| {
-                while let Ok((conn, addr)) = tcp.accept() {
-                    tracing::info!("TCP new connection: {addr:?}");
+                if let Ok((conn, addr)) = tcp.accept() {
+                    tracing::info!("TCP new connection: {:?}", addr.as_socket().unwrap().ip());
                     let conn_fd = conn.as_raw_fd();
                     if let Some(peer) = d.peers_by_ip.find(addr.as_socket().unwrap().ip()) {
                         {
