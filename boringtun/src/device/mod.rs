@@ -337,7 +337,19 @@ impl Device {
         )
         .unwrap();
 
-        let peer = Peer::new(tunn, next_index, endpoint, allowed_ips, preshared_key).unwrap();
+        let peer = Peer::new(
+            tunn,
+            next_index,
+            endpoint.clone(),
+            allowed_ips,
+            preshared_key,
+        )
+        .unwrap();
+        {
+            let conn = peer.endpoint().conn.as_ref().unwrap().as_raw_fd();
+            self.register_tcp_conn_handler(conn, endpoint.unwrap().into())
+                .unwrap();
+        }
 
         let peer = Arc::new(Mutex::new(peer));
         self.peers.insert(pub_key, Arc::clone(&peer));
@@ -612,7 +624,7 @@ impl Device {
         self.queue.new_event(
             tcp.as_raw_fd(),
             Box::new(move |d, _t| {
-                while let Ok((conn, addr)) = tcp.accept() {
+                if let Ok((conn, addr)) = tcp.accept() {
                     tracing::info!("TCP new connection: {addr:?}");
                     let conn_fd = conn.as_raw_fd();
                     if let Some(peer) = d.peers_by_ip.find(addr.as_socket().unwrap().ip()) {
