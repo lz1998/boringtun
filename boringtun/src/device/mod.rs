@@ -29,6 +29,7 @@ use std::collections::HashMap;
 use std::io::{self, Write as _};
 use std::mem::MaybeUninit;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+use std::os::fd::RawFd;
 use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -36,16 +37,15 @@ use std::thread;
 use std::thread::JoinHandle;
 
 use crate::noise::errors::WireGuardError;
-use crate::noise::handshake::parse_handshake_anon;
 use crate::noise::rate_limiter::RateLimiter;
-use crate::noise::{Packet, Tunn, TunnResult};
+use crate::noise::{Tunn, TunnResult};
 use crate::x25519;
 use allowed_ips::AllowedIps;
 use parking_lot::Mutex;
 use peer::{AllowedIP, Peer};
 use poll::{EventPoll, EventRef, WaitResult};
 use rand_core::{OsRng, RngCore};
-use socket2::{Domain, Protocol, Type};
+use socket2::{Domain, Protocol, SockAddr, Type};
 use tun::TunSocket;
 
 use dev_lock::{Lock, LockReadGuard};
@@ -137,8 +137,8 @@ pub struct Device {
     fwmark: Option<u32>,
 
     iface: Arc<TunSocket>,
-    udp4: Option<socket2::Socket>,
-    udp6: Option<socket2::Socket>,
+    tcp4: Option<socket2::Socket>,
+    tcp6: Option<socket2::Socket>,
 
     yield_notice: Option<EventRef>,
     exit_notice: Option<EventRef>,
@@ -376,8 +376,8 @@ impl Device {
             peers: Default::default(),
             peers_by_idx: Default::default(),
             peers_by_ip: AllowedIps::new(),
-            udp4: Default::default(),
-            udp6: Default::default(),
+            tcp4: Default::default(),
+            tcp6: Default::default(),
             cleanup_paths: Default::default(),
             mtu: AtomicUsize::new(mtu),
             rate_limiter: None,
@@ -411,14 +411,14 @@ impl Device {
     fn open_listen_socket(&mut self, mut port: u16) -> Result<(), Error> {
         // Binds the network facing interfaces
         // First close any existing open socket, and remove them from the event loop
-        if let Some(s) = self.udp4.take() {
+        if let Some(s) = self.tcp4.take() {
             unsafe {
                 // This is safe because the event loop is not running yet
                 self.queue.clear_event_by_fd(s.as_raw_fd())
             }
         };
 
-        if let Some(s) = self.udp6.take() {
+        if let Some(s) = self.tcp6.take() {
             unsafe { self.queue.clear_event_by_fd(s.as_raw_fd()) };
         }
 
@@ -427,25 +427,25 @@ impl Device {
         }
 
         // Then open new sockets and bind to the port
-        let udp_sock4 = socket2::Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-        udp_sock4.set_reuse_address(true)?;
-        udp_sock4.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port).into())?;
-        udp_sock4.set_nonblocking(true)?;
+        let tcp_listener4 = socket2::Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+        tcp_listener4.set_reuse_address(true)?;
+        tcp_listener4.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port).into())?;
+        tcp_listener4.set_nonblocking(true)?;
 
         if port == 0 {
             // Random port was assigned
-            port = udp_sock4.local_addr()?.as_socket().unwrap().port();
+            port = tcp_listener4.local_addr()?.as_socket().unwrap().port();
         }
 
-        let udp_sock6 = socket2::Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
-        udp_sock6.set_reuse_address(true)?;
-        udp_sock6.bind(&SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0).into())?;
-        udp_sock6.set_nonblocking(true)?;
+        let tcp_listener6 = socket2::Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))?;
+        tcp_listener6.set_reuse_address(true)?;
+        tcp_listener6.bind(&SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0).into())?;
+        tcp_listener6.set_nonblocking(true)?;
 
-        self.register_udp_handler(udp_sock4.try_clone().unwrap())?;
-        self.register_udp_handler(udp_sock6.try_clone().unwrap())?;
-        self.udp4 = Some(udp_sock4);
-        self.udp6 = Some(udp_sock6);
+        self.register_tcp_handler(tcp_listener4.try_clone().unwrap())?;
+        self.register_tcp_handler(tcp_listener6.try_clone().unwrap())?;
+        self.tcp4 = Some(tcp_listener4);
+        self.tcp6 = Some(tcp_listener6);
 
         self.listen_port = port;
 
@@ -467,10 +467,10 @@ impl Device {
         let rate_limiter = Arc::new(RateLimiter::new(&public_key, HANDSHAKE_RATE_LIMIT));
 
         for peer in self.peers.values_mut() {
-            let mut peer_mut = peer.lock();
+            let p = peer.lock();
 
-            if peer_mut
-                .tunnel
+            if p.tunnel
+                .lock()
                 .set_static_private(
                     private_key.clone(),
                     public_key,
@@ -498,11 +498,11 @@ impl Device {
         self.fwmark = Some(mark);
 
         // First set fwmark on listeners
-        if let Some(ref sock) = self.udp4 {
+        if let Some(ref sock) = self.tcp4 {
             sock.set_mark(mark)?;
         }
 
-        if let Some(ref sock) = self.udp6 {
+        if let Some(ref sock) = self.tcp6 {
             sock.set_mark(mark)?;
         }
 
@@ -554,11 +554,6 @@ impl Device {
             Box::new(|d, t| {
                 let peer_map = &d.peers;
 
-                let (udp4, udp6) = match (d.udp4.as_ref(), d.udp6.as_ref()) {
-                    (Some(udp4), Some(udp6)) => (udp4, udp6),
-                    _ => return Action::Continue,
-                };
-
                 // Go over each peer and invoke the timer function
                 for peer in peer_map.values() {
                     let mut p = peer.lock();
@@ -576,10 +571,14 @@ impl Device {
                         TunnResult::WriteToNetwork(packet) => {
                             match endpoint_addr {
                                 SocketAddr::V4(_) => {
-                                    udp4.send_to(packet, &endpoint_addr.into()).ok()
+                                    if let Some(ref conn) = p.endpoint().conn {
+                                        conn.send(packet).ok();
+                                    }
                                 }
                                 SocketAddr::V6(_) => {
-                                    udp6.send_to(packet, &endpoint_addr.into()).ok()
+                                    if let Some(ref conn) = p.endpoint().conn {
+                                        conn.send(packet).ok();
+                                    }
                                 }
                             };
                         }
@@ -608,13 +607,56 @@ impl Device {
             .stop_notification(self.yield_notice.as_ref().unwrap())
     }
 
-    fn register_udp_handler(&self, udp: socket2::Socket) -> Result<(), Error> {
+    fn register_tcp_handler(&self, tcp: socket2::Socket) -> Result<(), Error> {
         self.queue.new_event(
-            udp.as_raw_fd(),
+            tcp.as_raw_fd(),
+            Box::new(move |d, _t| {
+                while let Ok((conn, addr)) = tcp.accept() {
+                    tracing::info!("TCP new connection: {addr:?}");
+                    let conn_fd = conn.as_raw_fd();
+                    if let Some(peer) = d.peers_by_ip.find(addr.as_socket().unwrap().ip()) {
+                        {
+                            let peer = peer.lock();
+                            let mut endpoint = peer.endpoint_mut();
+                            endpoint.conn = Some(conn);
+                        }
+                        match d.register_tcp_conn_handler(conn_fd, addr.clone()) {
+                            Ok(_) => {
+                                tracing::info!("succeed to register tcp connection");
+                            }
+                            Err(err) => {
+                                tracing::error!("failed to register tcp connection, err: {err}");
+                            }
+                        }
+                    }
+                }
+                Action::Continue
+            }),
+        )?;
+        Ok(())
+    }
+
+    fn register_tcp_conn_handler(&self, conn: RawFd, addr: SockAddr) -> Result<(), Error> {
+        self.queue.new_event(
+            conn,
             Box::new(move |d, t| {
+                let p = match d.peers_by_ip.find(addr.as_socket().unwrap().ip()) {
+                    Some(peer) => peer.lock(),
+                    None => {
+                        tracing::error!("failed to get peer by ip");
+                        return Action::Continue;
+                    }
+                };
+                let endpoint = p.endpoint();
+                let conn = match endpoint.conn.as_ref() {
+                    Some(conn) => conn,
+                    None => {
+                        tracing::error!("failed to get peer conn");
+                        return Action::Continue;
+                    }
+                };
                 // Handler that handles anonymous packets over UDP
                 let mut iter = MAX_ITR;
-                let (private_key, public_key) = d.key_pair.as_ref().expect("Key not set");
 
                 let rate_limiter = d.rate_limiter.as_ref().unwrap();
 
@@ -624,7 +666,7 @@ impl Device {
                 // bytes to the buffer, so this casting is safe.
                 let src_buf =
                     unsafe { &mut *(&mut t.src_buf[..] as *mut [u8] as *mut [MaybeUninit<u8>]) };
-                while let Ok((packet_len, addr)) = udp.recv_from(src_buf) {
+                while let Ok(packet_len) = conn.recv(src_buf) {
                     let packet = &t.src_buf[..packet_len];
                     // The rate limiter initially checks mac1 and mac2, and optionally asks to send a cookie
                     let parsed_packet = match rate_limiter.verify_packet(
@@ -634,43 +676,44 @@ impl Device {
                     ) {
                         Ok(packet) => packet,
                         Err(TunnResult::WriteToNetwork(cookie)) => {
-                            let _: Result<_, _> = udp.send_to(cookie, &addr);
+                            let _: Result<_, _> = conn.send(cookie);
                             continue;
                         }
                         Err(_) => continue,
                     };
 
-                    let peer = match &parsed_packet {
-                        Packet::HandshakeInit(p) => {
-                            parse_handshake_anon(private_key, public_key, p)
-                                .ok()
-                                .and_then(|hh| {
-                                    d.peers.get(&x25519::PublicKey::from(hh.peer_static_public))
-                                })
-                        }
-                        Packet::HandshakeResponse(p) => d.peers_by_idx.get(&(p.receiver_idx >> 8)),
-                        Packet::PacketCookieReply(p) => d.peers_by_idx.get(&(p.receiver_idx >> 8)),
-                        Packet::PacketData(p) => d.peers_by_idx.get(&(p.receiver_idx >> 8)),
-                    };
+                    // let peer = match &parsed_packet {
+                    //     Packet::HandshakeInit(p) => {
+                    //         parse_handshake_anon(private_key, public_key, p)
+                    //             .ok()
+                    //             .and_then(|hh| {
+                    //                 d.peers.get(&x25519::PublicKey::from(hh.peer_static_public))
+                    //             })
+                    //     }
+                    //     Packet::HandshakeResponse(p) => d.peers_by_idx.get(&(p.receiver_idx >> 8)),
+                    //     Packet::PacketCookieReply(p) => d.peers_by_idx.get(&(p.receiver_idx >> 8)),
+                    //     Packet::PacketData(p) => d.peers_by_idx.get(&(p.receiver_idx >> 8)),
+                    // };
 
-                    let peer = match peer {
-                        None => continue,
-                        Some(peer) => peer,
-                    };
+                    // let peer = match peer {
+                    //     None => continue,
+                    //     Some(peer) => peer,
+                    // };
 
-                    let mut p = peer.lock();
+                    // let mut p = peer.lock();
 
                     // We found a peer, use it to decapsulate the message+
                     let mut flush = false; // Are there packets to send from the queue?
                     match p
                         .tunnel
+                        .lock()
                         .handle_verified_packet(parsed_packet, &mut t.dst_buf[..])
                     {
                         TunnResult::Done => {}
                         TunnResult::Err(_) => continue,
                         TunnResult::WriteToNetwork(packet) => {
                             flush = true;
-                            let _: Result<_, _> = udp.send_to(packet, &addr);
+                            let _: Result<_, _> = conn.send(packet);
                         }
                         TunnResult::WriteToTunnelV4(packet, addr) => {
                             if p.is_allowed_ip(addr) {
@@ -687,22 +730,22 @@ impl Device {
                     if flush {
                         // Flush pending queue
                         while let TunnResult::WriteToNetwork(packet) =
-                            p.tunnel.decapsulate(None, &[], &mut t.dst_buf[..])
+                            p.tunnel.lock().decapsulate(None, &[], &mut t.dst_buf[..])
                         {
-                            let _: Result<_, _> = udp.send_to(packet, &addr);
+                            let _: Result<_, _> = conn.send(packet);
                         }
                     }
 
-                    // This packet was OK, that means we want to create a connected socket for this peer
-                    let addr = addr.as_socket().unwrap();
-                    let ip_addr = addr.ip();
-                    p.set_endpoint(addr);
-                    if d.config.use_connected_socket {
-                        if let Ok(sock) = p.connect_endpoint(d.listen_port, d.fwmark) {
-                            d.register_conn_handler(Arc::clone(peer), sock, ip_addr)
-                                .unwrap();
-                        }
-                    }
+                    // // This packet was OK, that means we want to create a connected socket for this peer
+                    // let addr = addr.as_socket().unwrap();
+                    // let ip_addr = addr.ip();
+                    // p.set_endpoint(addr);
+                    // if d.config.use_connected_socket {
+                    //     if let Ok(sock) = p.connect_endpoint(d.listen_port, d.fwmark) {
+                    //         d.register_conn_handler(Arc::clone(peer), sock, ip_addr)
+                    //             .unwrap();
+                    //     }
+                    // }
 
                     iter -= 1;
                     if iter == 0 {
@@ -737,8 +780,8 @@ impl Device {
 
                 while let Ok(read_bytes) = udp.recv(src_buf) {
                     let mut flush = false;
-                    let mut p = peer.lock();
-                    match p.tunnel.decapsulate(
+                    let p = peer.lock();
+                    match p.tunnel.lock().decapsulate(
                         Some(peer_addr),
                         &t.src_buf[..read_bytes],
                         &mut t.dst_buf[..],
@@ -764,7 +807,7 @@ impl Device {
                     if flush {
                         // Flush pending queue
                         while let TunnResult::WriteToNetwork(packet) =
-                            p.tunnel.decapsulate(None, &[], &mut t.dst_buf[..])
+                            p.tunnel.lock().decapsulate(None, &[], &mut t.dst_buf[..])
                         {
                             let _: Result<_, _> = udp.send(packet);
                         }
@@ -793,8 +836,8 @@ impl Device {
                 // * Send encapsulated packet to the peer's endpoint
                 let mtu = d.mtu.load(Ordering::Relaxed);
 
-                let udp4 = d.udp4.as_ref().expect("Not connected");
-                let udp6 = d.udp6.as_ref().expect("Not connected");
+                let udp4 = d.tcp4.as_ref().expect("Not connected");
+                let udp6 = d.tcp6.as_ref().expect("Not connected");
 
                 let peers = &d.peers_by_ip;
                 for _ in 0..MAX_ITR {
@@ -819,12 +862,12 @@ impl Device {
                         None => continue,
                     };
 
-                    let mut peer = match peers.find(dst_addr) {
+                    let peer = match peers.find(dst_addr) {
                         Some(peer) => peer.lock(),
                         None => continue,
                     };
 
-                    match peer.tunnel.encapsulate(src, &mut t.dst_buf[..]) {
+                    match peer.tunnel.lock().encapsulate(src, &mut t.dst_buf[..]) {
                         TunnResult::Done => {}
                         TunnResult::Err(e) => {
                             tracing::error!(message = "Encapsulate error", error = ?e)
