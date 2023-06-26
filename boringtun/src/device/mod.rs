@@ -850,8 +850,8 @@ impl Device {
                 // * Send encapsulated packet to the peer's endpoint
                 let mtu = d.mtu.load(Ordering::Relaxed);
 
-                let udp4 = d.tcp4.as_ref().expect("Not connected");
-                let udp6 = d.tcp6.as_ref().expect("Not connected");
+                // let udp4 = d.tcp4.as_ref().expect("Not connected");
+                // let udp6 = d.tcp6.as_ref().expect("Not connected");
 
                 let peers = &d.peers_by_ip;
                 for _ in 0..MAX_ITR {
@@ -891,10 +891,10 @@ impl Device {
                             if let Some(conn) = endpoint.conn.as_mut() {
                                 // Prefer to send using the connected socket
                                 let _: Result<_, _> = conn.write(packet);
-                            } else if let Some(addr @ SocketAddr::V4(_)) = endpoint.addr {
-                                let _: Result<_, _> = udp4.send_to(packet, &addr.into());
-                            } else if let Some(addr @ SocketAddr::V6(_)) = endpoint.addr {
-                                let _: Result<_, _> = udp6.send_to(packet, &addr.into());
+                            //} else if let Some(addr @ SocketAddr::V4(_)) = endpoint.addr {
+                            //    let _: Result<_, _> = udp4.send_to(packet, &addr.into());
+                            //} else if let Some(addr @ SocketAddr::V6(_)) = endpoint.addr {
+                            //    let _: Result<_, _> = udp6.send_to(packet, &addr.into());
                             } else {
                                 tracing::error!("No endpoint");
                             }
