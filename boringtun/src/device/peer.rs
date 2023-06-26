@@ -1,7 +1,7 @@
 // Copyright (c) 2019 Cloudflare, Inc. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
-use parking_lot::{RwLock, Mutex};
+use parking_lot::{Mutex, RwLock};
 use socket2::{Domain, Protocol, Type};
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, SocketAddrV4, SocketAddrV6};
@@ -57,8 +57,8 @@ impl Peer {
         endpoint: Option<SocketAddr>,
         allowed_ips: &[AllowedIP],
         preshared_key: Option<[u8; 32]>,
-    ) -> Peer {
-        Peer {
+    ) -> Result<Peer, Error> {
+        let peer = Peer {
             tunnel: Mutex::new(tunnel),
             index,
             endpoint: RwLock::new(Endpoint {
@@ -67,7 +67,13 @@ impl Peer {
             }),
             allowed_ips: allowed_ips.iter().map(|ip| (ip, ())).collect(),
             preshared_key,
+        };
+        let conn = peer.connect_endpoint(None)?;
+        {
+            let mut endpoint = peer.endpoint_mut();
+            endpoint.conn = Some(conn);
         }
+        Ok(peer)
     }
 
     pub fn update_timers<'a>(&mut self, dst: &'a mut [u8]) -> TunnResult<'a> {
@@ -101,11 +107,7 @@ impl Peer {
         }
     }
 
-    pub fn connect_endpoint(
-        &self,
-        port: u16,
-        fwmark: Option<u32>,
-    ) -> Result<socket2::Socket, Error> {
+    pub fn connect_endpoint(&self, fwmark: Option<u32>) -> Result<socket2::Socket, Error> {
         let mut endpoint = self.endpoint.write();
 
         if endpoint.conn.is_some() {
@@ -116,32 +118,25 @@ impl Peer {
             .addr
             .expect("Attempt to connect to undefined endpoint");
 
-        let udp_conn =
+        let tcp_conn =
             socket2::Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
-        udp_conn.set_reuse_address(true)?;
-        let bind_addr = if addr.is_ipv4() {
-            SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port).into()
-        } else {
-            SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0).into()
-        };
-        udp_conn.bind(&bind_addr)?;
-        udp_conn.connect(&addr.into())?;
-        udp_conn.set_nonblocking(true)?;
+        tcp_conn.set_reuse_address(true)?;
+        tcp_conn.connect(&addr.into())?;
+        tcp_conn.set_nonblocking(true)?;
 
         #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
         if let Some(fwmark) = fwmark {
-            udp_conn.set_mark(fwmark)?;
+            tcp_conn.set_mark(fwmark)?;
         }
 
         tracing::info!(
             message="Connected endpoint",
-            port=port,
             endpoint=?endpoint.addr.unwrap()
         );
 
-        endpoint.conn = Some(udp_conn.try_clone().unwrap());
+        endpoint.conn = Some(tcp_conn.try_clone().unwrap());
 
-        Ok(udp_conn)
+        Ok(tcp_conn)
     }
 
     pub fn is_allowed_ip<I: Into<IpAddr>>(&self, addr: I) -> bool {
