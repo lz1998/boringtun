@@ -59,7 +59,7 @@ impl BinaryWriter for socket2::Socket {
         self.set_nonblocking(false).unwrap();
         println!("write2");
         self.write_u32(buf.len() as u32).unwrap();
-        println!("write3");
+        println!("write");
         println!("write buf: {}", hex::encode(&buf));
         self.write_all(buf).unwrap();
         self.set_nonblocking(true).unwrap();
