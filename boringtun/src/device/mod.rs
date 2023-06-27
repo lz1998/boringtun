@@ -3,6 +3,7 @@
 
 pub mod allowed_ips;
 pub mod api;
+pub mod binary;
 mod dev_lock;
 pub mod drop_privileges;
 #[cfg(test)]
@@ -49,6 +50,8 @@ use socket2::{Domain, Protocol, SockAddr, Type};
 use tun::TunSocket;
 
 use dev_lock::{Lock, LockReadGuard};
+
+use self::binary::{BinaryReader, BinaryWriter};
 
 const HANDSHAKE_RATE_LIMIT: u64 = 100; // The number of handshakes per second we can tolerate before using cookies
 
@@ -347,7 +350,7 @@ impl Device {
         )
         .unwrap();
         {
-            let conn = peer.endpoint().conn.as_ref().unwrap().as_raw_fd();
+            let conn = peer.endpoint().conn.as_ref().unwrap().lock().as_raw_fd();
             self.register_tcp_conn_handler(conn, endpoint.unwrap().into())
                 .unwrap();
         }
@@ -523,7 +526,7 @@ impl Device {
         // Then on all currently connected sockets
         for peer in self.peers.values() {
             if let Some(ref sock) = peer.lock().endpoint().conn {
-                sock.set_mark(mark)?
+                sock.lock().set_mark(mark)?
             }
         }
 
@@ -586,12 +589,12 @@ impl Device {
                             match endpoint_addr {
                                 SocketAddr::V4(_) => {
                                     if let Some(ref conn) = p.endpoint().conn {
-                                        conn.send(packet).ok();
+                                        conn.lock().write_packet(packet).ok();
                                     }
                                 }
                                 SocketAddr::V6(_) => {
                                     if let Some(ref conn) = p.endpoint().conn {
-                                        conn.send(packet).ok();
+                                        conn.lock().write_packet(packet).ok();
                                     }
                                 }
                             };
@@ -632,7 +635,7 @@ impl Device {
                         {
                             let peer = peer.lock();
                             let mut endpoint = peer.endpoint_mut();
-                            endpoint.conn = Some(conn);
+                            endpoint.conn = Some(Mutex::new(conn));
                         }
                         match d.register_tcp_conn_handler(conn_fd, addr.clone()) {
                             Ok(_) => {
@@ -678,10 +681,10 @@ impl Device {
 
                 // Safety: the `recv_from` implementation promises not to write uninitialised
                 // bytes to the buffer, so this casting is safe.
-                let src_buf =
-                    unsafe { &mut *(&mut t.src_buf[..] as *mut [u8] as *mut [MaybeUninit<u8>]) };
-                while let Ok(packet_len) = conn.recv(src_buf) {
-                    let packet = &t.src_buf[..packet_len];
+                // let src_buf =
+                //     unsafe { &mut *(&mut t.src_buf[..] as *mut [u8] as *mut [MaybeUninit<u8>]) };
+                while let Ok(packet) = conn.lock().read_packet(&mut t.src_buf) {
+                    // let packet = &t.src_buf[..packet_len];
                     // The rate limiter initially checks mac1 and mac2, and optionally asks to send a cookie
                     let parsed_packet = match rate_limiter.verify_packet(
                         Some(addr.as_socket().unwrap().ip()),
@@ -690,7 +693,7 @@ impl Device {
                     ) {
                         Ok(packet) => packet,
                         Err(TunnResult::WriteToNetwork(cookie)) => {
-                            let _: Result<_, _> = conn.send(cookie);
+                            let _: Result<_, _> = conn.lock().write_packet(cookie);
                             continue;
                         }
                         Err(_) => continue,
@@ -727,7 +730,7 @@ impl Device {
                         TunnResult::Err(_) => continue,
                         TunnResult::WriteToNetwork(packet) => {
                             flush = true;
-                            let _: Result<_, _> = conn.send(packet);
+                            let _: Result<_, _> = conn.lock().write_packet(packet);
                         }
                         TunnResult::WriteToTunnelV4(packet, addr) => {
                             if p.is_allowed_ip(addr) {
@@ -746,7 +749,7 @@ impl Device {
                         while let TunnResult::WriteToNetwork(packet) =
                             p.tunnel.lock().decapsulate(None, &[], &mut t.dst_buf[..])
                         {
-                            let _: Result<_, _> = conn.send(packet);
+                            let _: Result<_, _> = conn.lock().write_packet(packet);
                         }
                     }
 
@@ -890,7 +893,7 @@ impl Device {
                             let mut endpoint = peer.endpoint_mut();
                             if let Some(conn) = endpoint.conn.as_mut() {
                                 // Prefer to send using the connected socket
-                                let _: Result<_, _> = conn.write(packet);
+                                let _: Result<_, _> = conn.lock().write_packet(packet);
                             //} else if let Some(addr @ SocketAddr::V4(_)) = endpoint.addr {
                             //    let _: Result<_, _> = udp4.send_to(packet, &addr.into());
                             //} else if let Some(addr @ SocketAddr::V6(_)) = endpoint.addr {
