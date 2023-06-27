@@ -55,11 +55,8 @@ impl BinaryReader for socket2::Socket {
 }
 impl BinaryWriter for socket2::Socket {
     fn write_packet(&mut self, buf: &[u8]) -> Result<()> {
-        println!("write1");
         self.set_nonblocking(false).unwrap();
-        println!("write2");
         self.write_u32(buf.len() as u32).unwrap();
-        println!("write");
         println!("write buf: {}", hex::encode(&buf));
         self.write_all(buf).unwrap();
         self.set_nonblocking(true).unwrap();
