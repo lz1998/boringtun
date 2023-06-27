@@ -683,91 +683,97 @@ impl Device {
                 // bytes to the buffer, so this casting is safe.
                 // let src_buf =
                 //     unsafe { &mut *(&mut t.src_buf[..] as *mut [u8] as *mut [MaybeUninit<u8>]) };
-                if let Ok(packet) = conn.lock().read_packet(&mut t.src_buf) {
-                    // let packet = &t.src_buf[..packet_len];
-                    // The rate limiter initially checks mac1 and mac2, and optionally asks to send a cookie
-                    let parsed_packet = match rate_limiter.verify_packet(
-                        Some(addr.as_socket().unwrap().ip()),
-                        packet,
-                        &mut t.dst_buf,
-                    ) {
-                        Ok(packet) => packet,
-                        Err(TunnResult::WriteToNetwork(cookie)) => {
-                            let _: Result<_, _> = conn.lock().write_packet(cookie);
-                            return Action::Continue;
-                        }
-                        Err(_) => return Action::Continue,
-                    };
-
-                    // let peer = match &parsed_packet {
-                    //     Packet::HandshakeInit(p) => {
-                    //         parse_handshake_anon(private_key, public_key, p)
-                    //             .ok()
-                    //             .and_then(|hh| {
-                    //                 d.peers.get(&x25519::PublicKey::from(hh.peer_static_public))
-                    //             })
-                    //     }
-                    //     Packet::HandshakeResponse(p) => d.peers_by_idx.get(&(p.receiver_idx >> 8)),
-                    //     Packet::PacketCookieReply(p) => d.peers_by_idx.get(&(p.receiver_idx >> 8)),
-                    //     Packet::PacketData(p) => d.peers_by_idx.get(&(p.receiver_idx >> 8)),
-                    // };
-
-                    // let peer = match peer {
-                    //     None => continue,
-                    //     Some(peer) => peer,
-                    // };
-
-                    // let mut p = peer.lock();
-
-                    // We found a peer, use it to decapsulate the message+
-                    let mut flush = false; // Are there packets to send from the queue?
-                    match p
-                        .tunnel
-                        .lock()
-                        .handle_verified_packet(parsed_packet, &mut t.dst_buf[..])
-                    {
-                        TunnResult::Done => {}
-                        TunnResult::Err(_) => return Action::Continue,
-                        TunnResult::WriteToNetwork(packet) => {
-                            flush = true;
-                            let _: Result<_, _> = conn.lock().write_packet(packet);
-                        }
-                        TunnResult::WriteToTunnelV4(packet, addr) => {
-                            if p.is_allowed_ip(addr) {
-                                t.iface.write4(packet);
-                            }
-                        }
-                        TunnResult::WriteToTunnelV6(packet, addr) => {
-                            if p.is_allowed_ip(addr) {
-                                t.iface.write6(packet);
-                            }
-                        }
-                    };
-
-                    if flush {
-                        // Flush pending queue
-                        while let TunnResult::WriteToNetwork(packet) =
-                            p.tunnel.lock().decapsulate(None, &[], &mut t.dst_buf[..])
-                        {
-                            let _: Result<_, _> = conn.lock().write_packet(packet);
-                        }
-                    }
-
-                    // // This packet was OK, that means we want to create a connected socket for this peer
-                    // let addr = addr.as_socket().unwrap();
-                    // let ip_addr = addr.ip();
-                    // p.set_endpoint(addr);
-                    // if d.config.use_connected_socket {
-                    //     if let Ok(sock) = p.connect_endpoint(d.listen_port, d.fwmark) {
-                    //         d.register_conn_handler(Arc::clone(peer), sock, ip_addr)
-                    //             .unwrap();
-                    //     }
-                    // }
-
-                    iter -= 1;
-                    if iter == 0 {
+                let packet = match conn.lock().read_packet(&mut t.src_buf) {
+                    Ok(packet) => packet,
+                    Err(err) => {
+                        tracing::error!("failed to read_packet, err: {err}");
                         return Action::Continue;
                     }
+                };
+                // let packet = &t.src_buf[..packet_len];
+                // The rate limiter initially checks mac1 and mac2, and optionally asks to send a cookie
+                let parsed_packet = match rate_limiter.verify_packet(
+                    Some(addr.as_socket().unwrap().ip()),
+                    packet,
+                    &mut t.dst_buf,
+                ) {
+                    Ok(packet) => packet,
+                    Err(TunnResult::WriteToNetwork(cookie)) => {
+                        let _: Result<_, _> = conn.lock().write_packet(cookie);
+                        return Action::Continue;
+                    }
+                    Err(_) => return Action::Continue,
+                };
+
+                // let peer = match &parsed_packet {
+                //     Packet::HandshakeInit(p) => {
+                //         parse_handshake_anon(private_key, public_key, p)
+                //             .ok()
+                //             .and_then(|hh| {
+                //                 d.peers.get(&x25519::PublicKey::from(hh.peer_static_public))
+                //             })
+                //     }
+                //     Packet::HandshakeResponse(p) => d.peers_by_idx.get(&(p.receiver_idx >> 8)),
+                //     Packet::PacketCookieReply(p) => d.peers_by_idx.get(&(p.receiver_idx >> 8)),
+                //     Packet::PacketData(p) => d.peers_by_idx.get(&(p.receiver_idx >> 8)),
+                // };
+
+                // let peer = match peer {
+                //     None => continue,
+                //     Some(peer) => peer,
+                // };
+
+                // let mut p = peer.lock();
+
+                // We found a peer, use it to decapsulate the message+
+                let mut flush = false; // Are there packets to send from the queue?
+                match p
+                    .tunnel
+                    .lock()
+                    .handle_verified_packet(parsed_packet, &mut t.dst_buf[..])
+                {
+                    TunnResult::Done => {}
+                    TunnResult::Err(_) => return Action::Continue,
+                    TunnResult::WriteToNetwork(packet) => {
+                        flush = true;
+                        println!("write");
+                        let _: Result<_, _> = conn.lock().write_packet(packet);
+                    }
+                    TunnResult::WriteToTunnelV4(packet, addr) => {
+                        if p.is_allowed_ip(addr) {
+                            t.iface.write4(packet);
+                        }
+                    }
+                    TunnResult::WriteToTunnelV6(packet, addr) => {
+                        if p.is_allowed_ip(addr) {
+                            t.iface.write6(packet);
+                        }
+                    }
+                };
+
+                if flush {
+                    // Flush pending queue
+                    while let TunnResult::WriteToNetwork(packet) =
+                        p.tunnel.lock().decapsulate(None, &[], &mut t.dst_buf[..])
+                    {
+                        let _: Result<_, _> = conn.lock().write_packet(packet);
+                    }
+                }
+
+                // // This packet was OK, that means we want to create a connected socket for this peer
+                // let addr = addr.as_socket().unwrap();
+                // let ip_addr = addr.ip();
+                // p.set_endpoint(addr);
+                // if d.config.use_connected_socket {
+                //     if let Ok(sock) = p.connect_endpoint(d.listen_port, d.fwmark) {
+                //         d.register_conn_handler(Arc::clone(peer), sock, ip_addr)
+                //             .unwrap();
+                //     }
+                // }
+
+                iter -= 1;
+                if iter == 0 {
+                    return Action::Continue;
                 }
                 Action::Continue
             }),

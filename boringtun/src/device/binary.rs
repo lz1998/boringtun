@@ -1,4 +1,7 @@
-use std::io::{Read, Result, Write};
+use std::{
+    io::{BufReader, Read, Result, Write},
+    net::TcpStream,
+};
 
 pub trait BinaryReader: Read {
     fn read_u32(&mut self) -> Result<u32> {
@@ -41,23 +44,25 @@ pub trait BinaryWriter: Write {
 }
 impl BinaryReader for socket2::Socket {
     fn read_packet<'a>(&mut self, buf: &'a mut [u8]) -> Result<&'a mut [u8]> {
-        self.set_nonblocking(false);
+        self.set_nonblocking(false).unwrap();
         let len = self.read_u32()? as usize;
         let buf = &mut buf[..len];
         self.read_exact(buf)?;
         println!("read buf: {}", hex::encode(&buf));
-        self.set_nonblocking(true);
+        self.set_nonblocking(true).unwrap();
         Ok(buf)
     }
 }
 impl BinaryWriter for socket2::Socket {
     fn write_packet(&mut self, buf: &[u8]) -> Result<()> {
+        println!("write1");
         self.set_nonblocking(false).unwrap();
-        self.write_u32(buf.len() as u32)?;
+        println!("write2");
+        self.write_u32(buf.len() as u32).unwrap();
+        println!("write3");
         println!("write buf: {}", hex::encode(&buf));
-        self.write_all(buf)?;
+        self.write_all(buf).unwrap();
         self.set_nonblocking(true).unwrap();
         Ok(())
     }
 }
-
