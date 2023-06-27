@@ -683,7 +683,7 @@ impl Device {
                 // bytes to the buffer, so this casting is safe.
                 // let src_buf =
                 //     unsafe { &mut *(&mut t.src_buf[..] as *mut [u8] as *mut [MaybeUninit<u8>]) };
-                while let Ok(packet) = conn.lock().read_packet(&mut t.src_buf) {
+                if let Ok(packet) = conn.lock().read_packet(&mut t.src_buf) {
                     // let packet = &t.src_buf[..packet_len];
                     // The rate limiter initially checks mac1 and mac2, and optionally asks to send a cookie
                     let parsed_packet = match rate_limiter.verify_packet(
@@ -694,9 +694,9 @@ impl Device {
                         Ok(packet) => packet,
                         Err(TunnResult::WriteToNetwork(cookie)) => {
                             let _: Result<_, _> = conn.lock().write_packet(cookie);
-                            continue;
+                            return Action::Continue;
                         }
-                        Err(_) => continue,
+                        Err(_) => return Action::Continue,
                     };
 
                     // let peer = match &parsed_packet {
@@ -727,7 +727,7 @@ impl Device {
                         .handle_verified_packet(parsed_packet, &mut t.dst_buf[..])
                     {
                         TunnResult::Done => {}
-                        TunnResult::Err(_) => continue,
+                        TunnResult::Err(_) => return Action::Continue,
                         TunnResult::WriteToNetwork(packet) => {
                             flush = true;
                             let _: Result<_, _> = conn.lock().write_packet(packet);
@@ -766,7 +766,7 @@ impl Device {
 
                     iter -= 1;
                     if iter == 0 {
-                        break;
+                        return Action::Continue;
                     }
                 }
                 Action::Continue
