@@ -1,7 +1,7 @@
 // Copyright (c) 2019 Cloudflare, Inc. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
-use parking_lot::{RwLock, Mutex};
+use parking_lot::{Mutex, RwLock};
 use socket2::{Domain, Protocol, Type};
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, SocketAddrV4, SocketAddrV6};
@@ -13,7 +13,7 @@ use crate::noise::{Tunn, TunnResult};
 #[derive(Default, Debug)]
 pub struct Endpoint {
     pub addr: Option<SocketAddr>,
-    pub conn: Option<socket2::Socket>,
+    pub conn: Option<Mutex<socket2::Socket>>,
 }
 
 pub struct Peer {
@@ -85,7 +85,7 @@ impl Peer {
     pub fn shutdown_endpoint(&self) {
         if let Some(conn) = self.endpoint.write().conn.take() {
             tracing::info!("Disconnecting from endpoint");
-            conn.shutdown(Shutdown::Both).unwrap();
+            conn.lock().shutdown(Shutdown::Both).unwrap();
         }
     }
 
@@ -94,7 +94,7 @@ impl Peer {
         if endpoint.addr != Some(addr) {
             // We only need to update the endpoint if it differs from the current one
             if let Some(conn) = endpoint.conn.take() {
-                conn.shutdown(Shutdown::Both).unwrap();
+                conn.lock().shutdown(Shutdown::Both).unwrap();
             }
 
             endpoint.addr = Some(addr);
@@ -139,7 +139,7 @@ impl Peer {
             endpoint=?endpoint.addr.unwrap()
         );
 
-        endpoint.conn = Some(udp_conn.try_clone().unwrap());
+        endpoint.conn = Some(Mutex::new(udp_conn.try_clone().unwrap()));
 
         Ok(udp_conn)
     }
