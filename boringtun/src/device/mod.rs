@@ -670,7 +670,13 @@ impl Device {
                 // bytes to the buffer, so this casting is safe.
                 // let src_buf =
                 //     unsafe { &mut *(&mut t.src_buf[..] as *mut [u8] as *mut [MaybeUninit<u8>]) };
-                if let Ok(packet) = conn.lock().read_packet(&mut t.src_buf) {
+                let packet = match conn.lock().read_packet(&mut t.src_buf) {
+                    Ok(packet) => packet,
+                    Err(err) => {
+                        tracing::error!("failed to read_packet, err: {err}");
+                        return Action::Continue;
+                    }
+                };
                     // let packet = &t.src_buf[..packet_len];
                     // The rate limiter initially checks mac1 and mac2, and optionally asks to send a cookie
                     let parsed_packet = match rate_limiter.verify_packet(
@@ -755,7 +761,6 @@ impl Device {
                     if iter == 0 {
                         return Action::Continue;
                     }
-                }
                 Action::Continue
             }),
         )?;
